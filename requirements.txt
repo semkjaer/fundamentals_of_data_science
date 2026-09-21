@@ -1,0 +1,7 @@
+pandas
+country_converter
+gdown
+pyarrow
+fastparquet
+ipykernel
+openpyxl
