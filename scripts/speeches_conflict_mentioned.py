@@ -103,7 +103,9 @@ speeches_exploded = speeches_exploded.rename(columns={
 })
 # its now on the 'mention of a conflict in a speech' level so speaches can appear multiple times
 speeches_exploded = speeches_exploded.merge(
-    conflict[['conflict_id', 'year', 'iso3_a', 'iso3_a_2nd', 'iso3_b', 'iso3_b_2nd', 'iso3_loc',  'intensity_level', 'cumulative_intensity', 'type_of_conflict']],
+    conflict[['conflict_id', 'year',  'side_a', 'side_a_2nd', 'side_b', 'side_b_2nd',
+              'iso3_a', 'iso3_a_2nd', 'iso3_b', 'iso3_b_2nd', 'iso3_loc',  'intensity_level',
+              'cumulative_intensity', 'type_of_conflict']],
     on=['conflict_id', 'year'],
     how='left'
 )
@@ -212,4 +214,30 @@ ideals_added = ideals_added.merge(
     how='left'
 ).rename(columns={'AbsIdealDiff': 'side_b_ideals_diff'}).drop(columns=['iso3c1', 'iso3c2'])
 
-ideals_added.to_parquet("../data/conflict_mentions.parquet")
+df = ideals_added
+
+dist = pd.read_excel('../data/dist_cepii.xls')
+
+dist_cols = ['iso_o', 'iso_d', 'distw']  # population centre weighted distance
+dist_clean = dist[dist_cols]
+
+dist_reversed = dist_clean.rename(columns={'iso_o': 'iso_d', 'iso_d': 'iso_o'})
+dist_symmetric = pd.concat([dist_clean, dist_reversed], ignore_index=True).drop_duplicates(
+    subset=['iso_o', 'iso_d']
+)
+
+df = df.merge(
+    dist_symmetric,
+    left_on=['country_code', 'iso3_a'],
+    right_on=['iso_o', 'iso_d'],
+    how='left'
+).rename(columns={'distw': 'side_a_dist'}).drop(columns=['iso_o', 'iso_d'])
+
+df = df.merge(
+    dist_symmetric,
+    left_on=['country_code', 'iso3_b'],
+    right_on=['iso_o', 'iso_d'],
+    how='left'
+).rename(columns={'distw': 'side_b_dist'}).drop(columns=['iso_o', 'iso_d'])
+
+df.to_parquet('../data/conflict_mentions.parquet')
