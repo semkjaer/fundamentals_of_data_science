@@ -5,3 +5,4 @@ fastparquet
 ipykernel
 openpyxl
 tqdm
+xlrd
