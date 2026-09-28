@@ -6,3 +6,7 @@ ipykernel
 openpyxl
 tqdm
 xlrd
+xgboost
+scikit-learn
+matplotlib
+shap
