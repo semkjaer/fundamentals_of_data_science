@@ -75,7 +75,7 @@ for col in gw_columns:
         print(f"Converted {col} -> {target_col} (Non-null: {conflict[target_col].notna().sum()} / {len(conflict)})")
 
 # ---------------------------------------------------------
-# 2. Build Regex Search Patterns per Conflict Location / Participants
+# 2. Build Target Entity Regex Patterns (Location + Side A/B)
 # ---------------------------------------------------------
 country_data = cc.data
 country_names = country_data[['ISO3', 'IEA', 'name_official', 'name_short', 'regex']].dropna(subset=['ISO3'])
@@ -89,39 +89,50 @@ for _, row in country_names.iterrows():
     if variants:
         iso3_to_variants[iso3] = variants
 
-def build_multi_country_pattern(row):
+def build_targeted_entity_pattern(row):
     """
-    Extracts ISO3 codes from iso3_loc, iso3_a, iso3_b, and 2nd actors.
-    Handles Type 2 interstate wars seamlessly.
+    Extracts name variants for:
+    1. Conflict Location (iso3_loc)
+    2. Primary & Secondary Side A ISO3s + raw side_a text
+    3. Primary & Secondary Side B ISO3s + raw side_b text (e.g. rebel/actor names)
     """
     iso_list = []
     
-    # Gather ISO3 codes across all actor/location fields
+    # 1. Gather ISO3 codes across all actor and location fields
     for col in ['iso3_loc', 'iso3_a', 'iso3_b', 'iso3_a_2nd', 'iso3_b_2nd']:
         val = row.get(col)
         if pd.notna(val) and str(val).strip() not in ['', 'nan', 'None']:
             codes = [code.strip() for code in str(val).split(',') if code.strip()]
             iso_list.extend(codes)
 
-    if not iso_list:
-        return None
-        
     all_variants = []
     for iso in set(iso_list):
         if iso in iso3_to_variants:
             all_variants.extend(iso3_to_variants[iso])
             
+    # 2. Add fulltext names of side_a and side_b (e.g., specific non-state groups or state names)
+    for actor_col in ['side_a', 'side_b', 'side_a_2nd', 'side_b_2nd']:
+        text_val = row.get(actor_col)
+        if pd.notna(text_val) and str(text_val).strip() not in ['', 'nan', 'None']:
+            # Handle multiple actors delimited by commas or slashes
+            actors = re.split(r'[,;/]+', str(text_val))
+            for actor in actors:
+                cleaned_actor = actor.strip()
+                # Ignore generic placeholder text
+                if len(cleaned_actor) > 2 and not cleaned_actor.lower().startswith('government of'):
+                    all_variants.append(cleaned_actor)
+
     if not all_variants:
         return None
         
     unique_variants = list(set(all_variants))
     escaped = [re.escape(v) for v in unique_variants if len(v) > 0]
-    escaped.sort(key=len, reverse=True)
+    escaped.sort(key=len, reverse=True)  # Match longest strings first
     
     return re.compile(r'\b(' + '|'.join(escaped) + r')\b', flags=re.IGNORECASE)
 
-# Now iso3_loc, iso3_a, and iso3_b exist in conflict DataFrame
-conflict['compiled_pattern'] = conflict.apply(build_multi_country_pattern, axis=1)
+# Compile entity matching patterns
+conflict['compiled_pattern'] = conflict.apply(build_targeted_entity_pattern, axis=1)
 
 # Select metadata columns
 conflict_meta_cols = [
@@ -148,18 +159,39 @@ speech_texts = speeches.groupby(['year', 'country_code'])['text'].apply(lambda x
 conflict_speaker_df = conflict_speaker_df.merge(speech_texts, on=['year', 'country_code'], how='left')
 
 # ---------------------------------------------------------
-# 4. Check Speech Text for Conflict Mentions (Boolean Flag)
+# 4. Check Speech Text for Conflict Mentions (Entity + War Term)
 # ---------------------------------------------------------
 tqdm.pandas(desc="Evaluating conflict mentions in speeches")
 
-def check_mention(row):
+# Generic conflict/war anchor terms common in UN general debate speeches
+WAR_ANCHOR_TERMS = [
+    r'conflict', r'war', r'warfare', r'fighting', r'hostilities', r'ceasefire', 
+    r'aggression', r'rebel', r'rebels', r'insurgency', r'insurgents', 
+    r'armed groups?', r'violence', r'violent', r'crisis', r'clashes', 
+    r'military operations?', r'peacekeeping', r'invasion', r'combatants?',
+    r'terroris[mt]', r'attacks?', r'atrocities', r'casualties'
+]
+
+WAR_ANCHOR_PATTERN = re.compile(r'\b(' + '|'.join(WAR_ANCHOR_TERMS) + r')\b', flags=re.IGNORECASE)
+
+def check_targeted_mention(row):
     text = row['text']
     pattern = row['compiled_pattern']
+    
     if pd.isna(text) or not pattern or not isinstance(text, str):
         return False
-    return bool(pattern.search(text))
+        
+    # Condition 1: Mentions conflict location, Side A, or Side B
+    has_entity_mention = bool(pattern.search(text))
+    if not has_entity_mention:
+        return False
+        
+    # Condition 2: Speech ALSO mentions at least one war/conflict anchor term
+    has_war_keyword = bool(WAR_ANCHOR_PATTERN.search(text))
+    
+    return has_entity_mention and has_war_keyword
 
-conflict_speaker_df['has_conflict_mention'] = conflict_speaker_df.progress_apply(check_mention, axis=1)
+conflict_speaker_df['has_conflict_mention'] = conflict_speaker_df.progress_apply(check_targeted_mention, axis=1)
 
 # Drop heavy regex objects and full text prior to merging features
 conflict_speaker_df = conflict_speaker_df.drop(columns=['compiled_pattern', 'text'])
@@ -293,6 +325,7 @@ conflict_deaths = conflict_deaths[additive_conflict_cols]
 df = df.merge(conflict_deaths, on=['conflict_id', 'year'], how='left')
 
 # ---------------------------------------------------------
-# 9. save data
+# 9. Save Data
 # ---------------------------------------------------------
-df.to_parquet('../data/final_clean.csv')
+df.to_csv('../data/final_clean.csv')
+df.to_csv('../final_clean.csv') # saved to git
