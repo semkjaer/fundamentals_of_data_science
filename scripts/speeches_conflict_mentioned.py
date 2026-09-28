@@ -4,15 +4,13 @@ import pandas as pd
 from tqdm import tqdm
 import country_converter as coco
 
+# Initialize country_converter instance
 cc = coco.CountryConverter()
 
 # ---------------------------------------------------------
 # 1. Load UCDP/PRIO Conflict Data & Convert GW Codes to ISO3
 # ---------------------------------------------------------
 conflict = pd.read_excel("../data/2026_ucdp-prio-acd-261.xlsx")
-
-# Initialize country_converter instance
-cc = coco.CountryConverter()
 
 # Explicit overrides for historical GW codes that country_converter cannot resolve
 HISTORICAL_GW_TO_ISO3 = {
@@ -26,14 +24,9 @@ HISTORICAL_GW_TO_ISO3 = {
 }
 
 def convert_single_gw_code(code_val) -> str:
-    """
-    Converts a single GW numeric code (or string representation of one) into ISO3.
-    Returns None if missing, invalid, or zero.
-    """
+    """Converts a single GW numeric code to ISO3."""
     if pd.isna(code_val):
         return None
-    
-    # Clean string and convert to integer
     try:
         code_int = int(float(str(code_val).strip()))
     except (ValueError, TypeError):
@@ -42,22 +35,14 @@ def convert_single_gw_code(code_val) -> str:
     if code_int <= 0:
         return None
         
-    # 1. Check manual historical dictionary
     if code_int in HISTORICAL_GW_TO_ISO3:
         return HISTORICAL_GW_TO_ISO3[code_int]
         
-    # 2. Convert via country_converter
     res = cc.convert(names=code_int, src="GWcode", to="ISO3", not_found=None)
     return res if res and res != "not found" else None
 
 def convert_gw_cell(val):
-    """
-    Handles single codes, floats, and comma-separated lists of codes.
-    E.g.:
-      145       -> "BOL"
-      "28, 3"   -> "GBR, USA"
-      np.nan    -> np.nan
-    """
+    """Handles single codes, floats, and delimited lists of GW codes (commas, slashes, spaces)."""
     if pd.isna(val):
         return np.nan
         
@@ -65,25 +50,24 @@ def convert_gw_cell(val):
     if not val_str or val_str in ['0', 'nan', 'None']:
         return np.nan
         
-    # Case A: Comma-separated list of codes
-    if "," in val_str:
-        raw_codes = [c.strip() for c in val_str.split(",")]
-        converted = [convert_single_gw_code(c) for c in raw_codes]
-        valid_codes = [c for c in converted if c is not None]
-        return ", ".join(valid_codes) if valid_codes else np.nan
-        
-    # Case B: Single code
-    res = convert_single_gw_code(val_str)
-    return res if res is not None else np.nan
+    # Split across commas, slashes, semicolons, or whitespace
+    raw_codes = re.split(r'[,/;\s]+', val_str)
+    raw_codes = [c.strip() for c in raw_codes if c.strip()]
+    
+    converted = [convert_single_gw_code(c) for c in raw_codes]
+    valid_codes = [c for c in converted if c is not None]
+    
+    return ", ".join(list(dict.fromkeys(valid_codes))) if valid_codes else np.nan
 
 gw_columns = [
-    'gwno_a',      # Primary actor Side A (usually Government)
+    'gwno_a',      # Primary actor Side A
     'gwno_a_2nd',  # Supporting actors Side A
-    'gwno_b',      # Primary actor Side B (State if interstate, NaN if rebel group)
+    'gwno_b',      # Primary actor Side B
     'gwno_b_2nd',  # Supporting actors Side B
     'gwno_loc'     # Conflict location
 ]
 
+# PERFORM GW TO ISO3 CONVERSION FIRST BEFORE ANY PATTERN BUILDING
 for col in gw_columns:
     if col in conflict.columns:
         target_col = col.replace('gwno_', 'iso3_')
@@ -91,31 +75,62 @@ for col in gw_columns:
         print(f"Converted {col} -> {target_col} (Non-null: {conflict[target_col].notna().sum()} / {len(conflict)})")
 
 # ---------------------------------------------------------
-# 2. Build Regex Search Patterns per Conflict Location
+# 2. Build Regex Search Patterns per Conflict Location / Participants
 # ---------------------------------------------------------
 country_data = cc.data
-country_names = country_data[['ISO3', 'IEA', 'name_official', 'name_short', 'regex']]
+country_names = country_data[['ISO3', 'IEA', 'name_official', 'name_short', 'regex']].dropna(subset=['ISO3'])
 
-# Merge country names based on the conflict's location ISO3 code
-conflict_patterns = conflict.merge(country_names, left_on='iso3_loc', right_on='ISO3', how='left')
-
-def build_pattern(row):
+# Map ISO3 codes to all available name variants
+iso3_to_variants = {}
+for _, row in country_names.iterrows():
+    iso3 = str(row['ISO3']).strip()
     cols = ['IEA', 'name_official', 'name_short', 'regex']
     variants = [str(row[c]).strip() for c in cols if pd.notna(row[c]) and str(row[c]).strip() not in ['', 'nan', '0']]
-    if not variants:
+    if variants:
+        iso3_to_variants[iso3] = variants
+
+def build_multi_country_pattern(row):
+    """
+    Extracts ISO3 codes from iso3_loc, iso3_a, iso3_b, and 2nd actors.
+    Handles Type 2 interstate wars seamlessly.
+    """
+    iso_list = []
+    
+    # Gather ISO3 codes across all actor/location fields
+    for col in ['iso3_loc', 'iso3_a', 'iso3_b', 'iso3_a_2nd', 'iso3_b_2nd']:
+        val = row.get(col)
+        if pd.notna(val) and str(val).strip() not in ['', 'nan', 'None']:
+            codes = [code.strip() for code in str(val).split(',') if code.strip()]
+            iso_list.extend(codes)
+
+    if not iso_list:
         return None
-    escaped = [re.escape(v) for v in variants if len(v) > 0]
+        
+    all_variants = []
+    for iso in set(iso_list):
+        if iso in iso3_to_variants:
+            all_variants.extend(iso3_to_variants[iso])
+            
+    if not all_variants:
+        return None
+        
+    unique_variants = list(set(all_variants))
+    escaped = [re.escape(v) for v in unique_variants if len(v) > 0]
+    escaped.sort(key=len, reverse=True)
+    
     return re.compile(r'\b(' + '|'.join(escaped) + r')\b', flags=re.IGNORECASE)
 
-conflict_patterns['compiled_pattern'] = conflict_patterns.apply(build_pattern, axis=1)
+# Now iso3_loc, iso3_a, and iso3_b exist in conflict DataFrame
+conflict['compiled_pattern'] = conflict.apply(build_multi_country_pattern, axis=1)
 
-# Keep relevant metadata from conflict file
+# Select metadata columns
 conflict_meta_cols = [
     'conflict_id', 'year', 'side_a', 'side_a_2nd', 'side_b', 'side_b_2nd',
     'iso3_a', 'iso3_a_2nd', 'iso3_b', 'iso3_b_2nd', 'iso3_loc', 'intensity_level',
     'cumulative_intensity', 'type_of_conflict', 'compiled_pattern'
 ]
-conflict_clean = conflict_patterns[conflict_meta_cols]
+existing_cols = [col for col in conflict_meta_cols if col in conflict.columns]
+conflict_clean = conflict[existing_cols]
 
 # ---------------------------------------------------------
 # 3. Create Full Conflict-Speaker Cross-Join Grid per Year
