@@ -1,0 +1,12 @@
+pandas
+country_converter
+pyarrow
+fastparquet
+ipykernel
+openpyxl
+tqdm
+xlrd
+xgboost
+scikit-learn
+matplotlib
+shap
